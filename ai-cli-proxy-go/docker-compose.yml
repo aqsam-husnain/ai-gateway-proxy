@@ -1,0 +1,76 @@
+services:
+  # Redis for response caching (optional — proxy runs without it).
+  redis:
+    image: redis:7-alpine
+    container_name: ai-proxy-go-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-ai_proxy_redis_password}
+    ports:
+      - "6381:6379"   # 6381 to avoid conflict with the Node.js stack on 6380
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-ai_proxy_redis_password}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # CODENEX-AI-PROXY-API — Go/Gin edition
+  ai-proxy-go:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-proxy-go
+    ports:
+      - "3001:3000"   # Main API & Web UI  (3001 to avoid conflict with Node.js on 3000)
+      - "8087:8085"   # Gemini CLI OAuth callback
+      - "8088:8086"   # Antigravity OAuth callback
+    volumes:
+      # Provider pool config + credentials (read-write so the proxy can
+      # persist refreshed OAuth tokens and update pool state).
+      - ./configs:/app/configs
+      # Log output
+      - ./logs:/app/logs
+      # Claude Code CLI credentials (for claudeCode-custom provider)
+      - ~/.claude:/home/proxy/.claude:ro
+    environment:
+      # ---- Core -------------------------------------------------------
+      - GIN_MODE=release
+      - PORT=3000
+      - HOST=0.0.0.0
+
+      # ---- Auth -------------------------------------------------------
+      # API key clients must send in Authorization: Bearer <key>
+      - REQUIRED_API_KEY=${REQUIRED_API_KEY:-123456}
+
+      # ---- Redis ------------------------------------------------------
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-ai_proxy_redis_password}@redis:6379/0
+
+      # ---- OAuth credentials (Gemini / Antigravity) -------------------
+      - GEMINI_CLI_OAUTH_CLIENT_ID=${GEMINI_CLI_OAUTH_CLIENT_ID}
+      - GEMINI_CLI_OAUTH_CLIENT_SECRET=${GEMINI_CLI_OAUTH_CLIENT_SECRET}
+      - GEMINI_ANTIGRAVITY_OAUTH_CLIENT_ID=${GEMINI_ANTIGRAVITY_OAUTH_CLIENT_ID:-}
+      - GEMINI_ANTIGRAVITY_OAUTH_CLIENT_SECRET=${GEMINI_ANTIGRAVITY_OAUTH_CLIENT_SECRET:-}
+
+      # ---- Optional provider overrides --------------------------------
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY:-}
+      - CLAUDE_BASE_URL=${CLAUDE_BASE_URL:-}
+
+      # ---- OAuth external host (set when behind a reverse-proxy/ALB) --
+      - OAUTH_EXTERNAL_HOST=${OAUTH_EXTERNAL_HOST:-}
+
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  redis_data:
